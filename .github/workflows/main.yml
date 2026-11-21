@@ -1,0 +1,40 @@
+name: EDK2-HelloWorld-国内编译
+run-name: 编译HelloWorld UEFI程序 @${{ github.actor }}
+on:
+  push:
+    paths:
+      - 'HelloWorldPkg/**'
+      - '.github/workflows/edk2-helloworld.yml'
+  workflow_dispatch:
+
+jobs:
+  build-uefi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 拉取完整代码与所有嵌套子模块
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 安装EDK2编译全量依赖
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential uuid-dev iasl nasm gcc python3-distutils git
+
+      - name: 初始化EDK2环境并编译基础工具集
+        run: |
+          source edksetup.sh BaseTools
+          make -C BaseTools -j$(nproc)
+
+      - name: 编译HelloWorld UEFI应用
+        run: |
+          build -p HelloWorldPkg/HelloWorldPkg.dsc -b DEBUG -t GCC -a X64
+
+      - name: 导出编译生成的efi文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloWorld-X64-EFI
+          path: Build/HelloWorldPkg/DEBUG_GCC/X64/HelloWorld.efi
+          retention-days: 30
