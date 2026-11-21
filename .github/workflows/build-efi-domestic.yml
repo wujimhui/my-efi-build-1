@@ -1,0 +1,99 @@
+name: Build UEFI (.efi) 国产平台（海光/兆芯/飞腾/龙芯）
+
+# 架构对照：
+#   海光（Hygon，x86_64，AMD Zen 系）与 兆芯（Zhaoxin，x86_64，VIA 系）
+#       -> 同为 X64，编译一份即可，两家的 UEFI 固件都能运行
+#   飞腾（Phytium，ARMv8 64 位）        -> AARCH64
+#   龙芯（Loongson，LoongArch，3A5000/3A6000/3C5000 等） -> LOONGARCH64
+# 注意：龙芯 3A4000 及更早的老款（MIPS 架构）不能运行 LoongArch 的 .efi
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 海光和兆芯
+            arch: X64
+          - platform: 飞腾
+            arch: AARCH64
+          - platform: 龙芯
+            arch: LOONGARCH64
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ---------- 基础依赖（所有平台都需要） ----------
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential nasm iasl uuid-dev python3 python3-setuptools
+
+      # ---------- 飞腾（AARCH64）专属：装 ARM 交叉编译器 ----------
+      - name: 安装飞腾 AARCH64 交叉编译器
+        if: matrix.arch == 'AARCH64'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # ---------- 龙芯（LOONGARCH64）专属：Ubuntu 源里没有 LoongArch 编译器，
+      # 需下载龙芯官方工具链，并把 EDK II 要求的前缀名对上 ----------
+      - name: 安装龙芯 LoongArch 交叉编译器
+        if: matrix.arch == 'LOONGARCH64'
+        run: |
+          curl -L --retry 3 -o /opt/loongarch-toolchain.tar.xz \
+            https://github.com/loongson/build-tools/releases/download/2025.08.08/x86_64-cross-tools-loongarch64-binutils_2.45-gcc_15.1.0-glibc_2.42.tar.xz
+          mkdir -p /opt/loongarch
+          tar -xJf /opt/loongarch-toolchain.tar.xz -C /opt/loongarch
+          # 工具链内部程序名是 loongarch64-unknown-linux-gnu-*，
+          # 而 EDK II 默认找 loongarch64-linux-gnu-*，做一组软链接对齐
+          cd /opt/loongarch/cross-tools/bin
+          for t in gcc g++ ar as ld objcopy objdump ranlib strip; do
+            if [ -f loongarch64-unknown-linux-gnu-$t ]; then
+              ln -sf loongarch64-unknown-linux-gnu-$t loongarch64-linux-gnu-$t
+            fi
+          done
+          echo "/opt/loongarch/cross-tools/bin" >> $GITHUB_PATH
+
+      # ---------- 克隆 EDK II ----------
+      - name: 克隆 EDK II
+        run: |
+          git clone --depth 1 --recursive --branch edk2-stable202608 \
+            https://github.com/tianocore/edk2.git $HOME/edk2
+
+      # ---------- 编译（核心：只改 -a 架构参数） ----------
+      - name: 编译 ${{ matrix.platform }} 平台（${{ matrix.arch }}）的 .efi
+        run: |
+          cd $HOME/edk2
+          make -C BaseTools -j$(nproc)
+          . edksetup.sh BaseTools
+          # 显式指定交叉编译器前缀，避免找不到编译器
+          if [ "${{ matrix.arch }}" = "AARCH64" ]; then
+            export GCC5_AARCH64_PREFIX=aarch64-linux-gnu-
+          fi
+          if [ "${{ matrix.arch }}" = "LOONGARCH64" ]; then
+            export GCC5_LOONGARCH64_PREFIX=loongarch64-linux-gnu-
+          fi
+          build -a ${{ matrix.arch }} -t GCC5 \
+            -p MdeModulePkg/MdeModulePkg.dsc \
+            -m MdeModulePkg/Application/HelloWorld/HelloWorld.inf
+
+      # ---------- 收集并上传产物 ----------
+      - name: 收集 .efi 产物
+        run: |
+          mkdir -p output
+          find $HOME/edk2/Build -name "*.efi" -exec cp {} output/ \;
+          ls -la output/
+
+      - name: 上传 ${{ matrix.platform }} 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: efi-binaries-${{ matrix.platform }}
+          path: output/*.efi
+          retention-days: 30
